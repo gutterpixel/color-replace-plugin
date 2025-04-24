@@ -1,8 +1,13 @@
+// Show the UI
 figma.showUI(__html__, { width: 520, height: 480 });
 
 import chroma from 'chroma-js';
 
-type RGB = { r: number; g: number; b: number };
+interface RGB {
+  r: number;
+  g: number;
+  b: number;
+}
 
 interface GroupedColor {
   hex: string;
@@ -16,17 +21,17 @@ function rgbToHex({ r, g, b }: RGB): string {
   return chroma.rgb(r * 255, g * 255, b * 255).hex();
 }
 
-function groupSimilarColors(colors: { node: SceneNode; hex: string }[], threshold = 20): GroupedColor[] {
+function groupSimilarColors(colors: { node: SceneNode; hex: string }[], threshold: number = 20): GroupedColor[] {
   const groups: GroupedColor[] = [];
 
-  for (const { node, hex } of colors) {
-    const match = groups.find(g => chroma.distance(g.hex, hex, 'rgb') < threshold);
+  colors.forEach(({ node, hex }) => {
+    const match = groups.find(group => chroma.distance(group.hex, hex, 'rgb') < threshold);
     if (match) {
       match.nodes.push(node);
     } else {
       groups.push({ hex, nodes: [node] });
     }
-  }
+  });
 
   return groups;
 }
@@ -40,13 +45,15 @@ function* walkTree(node: SceneNode): IterableIterator<SceneNode> {
   }
 }
 
-function collectSelectionColors(queryHex?: string) {
+function collectSelectionColors(queryHex?: string): void {
+  const selection = figma.currentPage.selection;
   const foundColors: { node: SceneNode; hex: string }[] = [];
 
-  for (const node of figma.currentPage.selection) {
+  for (const node of selection) {
     for (const child of walkTree(node)) {
       if ('fills' in child && Array.isArray(child.fills)) {
-        for (const fill of child.fills as readonly Paint[]) {
+        const fills = child.fills as readonly Paint[];
+        for (const fill of fills) {
           if (fill.type === 'SOLID') {
             const hex = rgbToHex(fill.color);
             if (!queryHex || chroma.distance(hex, queryHex, 'rgb') < 20) {
@@ -62,16 +69,16 @@ function collectSelectionColors(queryHex?: string) {
   figma.ui.postMessage({ type: 'selection-colors', data: groupedSelectionColors });
 }
 
-function loadBrandVariables() {
-  const allVars = figma.variables.getLocalVariables();
-  const remoteVars = allVars.filter(v => v.remote && v.resolvedType === 'COLOR');
+function loadBrandVariables(): void {
+  const allVariables = figma.variables.getLocalVariables();
+  const remoteVariables = allVariables.filter(v => v.remote && v.resolvedType === 'COLOR');
 
   const collected: { name: string; id: string; hex: string }[] = [];
 
-  for (const variable of remoteVars) {
-    const modeIds = Object.keys(variable.valuesByMode ?? {});
+  for (const variable of remoteVariables) {
+    const modeIds = Object.keys(variable.valuesByMode || {});
     if (modeIds.length === 0) continue;
-    const value = variable.valuesByMode[modeIds[0]];
+    const value = variable.valuesByMode?.[modeIds[0]];
     if (value && typeof value === 'object' && 'r' in value) {
       const hex = rgbToHex(value as RGB);
       collected.push({ name: variable.name, id: variable.id, hex });
@@ -82,19 +89,16 @@ function loadBrandVariables() {
   figma.ui.postMessage({ type: 'brand-colors', data: brandVariables });
 }
 
-function applyVariableToGroup(groupHex: string, variableId: string) {
+function applyVariableToGroup(groupHex: string, variableId: string): void {
   const group = groupedSelectionColors.find(g => g.hex === groupHex);
   if (!group) return;
 
   for (const node of group.nodes) {
     if ('boundVariables' in node && typeof node.setBoundVariable === 'function') {
-      const bindings = figma.variables.getApplicableVariableBindingKeys(node);
-      if (bindings.includes('fill')) {
-        try {
-          node.setBoundVariable('fill', variableId);
-        } catch (err) {
-          console.warn(`Could not bind variable to node:`, node, err);
-        }
+      try {
+        node.setBoundVariable('fills' as any, variableId);
+      } catch (e) {
+        console.warn(`Could not bind variable to node:`, node, e);
       }
     }
   }
@@ -104,18 +108,22 @@ function applyVariableToGroup(groupHex: string, variableId: string) {
 }
 
 figma.ui.onmessage = msg => {
-  if (msg.type === 'init') {
-    loadBrandVariables();
-    collectSelectionColors();
-  }
+  switch (msg.type) {
+    case 'init':
+      loadBrandVariables();
+      collectSelectionColors();
+      break;
 
-  if (msg.type === 'replace-group') {
-    const { groupHex, variableId } = msg.data;
-    applyVariableToGroup(groupHex, variableId);
-  }
+    case 'replace-group': {
+      const { groupHex, variableId } = msg.data;
+      applyVariableToGroup(groupHex, variableId);
+      break;
+    }
 
-  if (msg.type === 'search-colors') {
-    const { queryHex } = msg.data;
-    collectSelectionColors(queryHex);
+    case 'search-colors': {
+      const { queryHex } = msg.data;
+      if (queryHex) collectSelectionColors(queryHex);
+      break;
+    }
   }
 };
