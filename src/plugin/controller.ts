@@ -69,23 +69,44 @@ function collectSelectionColors(queryHex?: string): void {
   figma.ui.postMessage({ type: 'selection-colors', data: groupedSelectionColors });
 }
 
-function loadBrandVariables(): void {
+async function loadBrandVariables(): Promise<void> {
+  const brandSet: { name: string; id: string; hex: string }[] = [];
+
   const allVariables = figma.variables.getLocalVariables();
-  const remoteVariables = allVariables.filter(v => v.remote && v.resolvedType === 'COLOR');
-
-  const collected: { name: string; id: string; hex: string }[] = [];
-
-  for (const variable of remoteVariables) {
-    const modeIds = Object.keys(variable.valuesByMode || {});
-    if (modeIds.length === 0) continue;
-    const value = variable.valuesByMode?.[modeIds[0]];
-    if (value && typeof value === 'object' && 'r' in value) {
-      const hex = rgbToHex(value as RGB);
-      collected.push({ name: variable.name, id: variable.id, hex });
+  for (const variable of allVariables) {
+    if (variable.resolvedType === 'COLOR') {
+      const modeIds = Object.keys(variable.valuesByMode);
+      const value = variable.valuesByMode[modeIds[0]];
+      if (value && typeof value === 'object' && 'r' in value) {
+        const hex = rgbToHex(value as RGB);
+        brandSet.push({ name: variable.name, id: variable.id, hex });
+      }
     }
   }
 
-  brandVariables = collected;
+  if (figma.teamLibrary) {
+    const remoteCollections = await figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
+    for (const collection of remoteCollections) {
+      const vars = await figma.teamLibrary.getVariablesInLibraryCollectionAsync(collection.key);
+      for (const v of vars) {
+        if (v.resolvedType === 'COLOR') {
+          try {
+            const imported = await figma.variables.importVariableByKeyAsync(v.key);
+            const modeIds = Object.keys(imported.valuesByMode);
+            const value = imported.valuesByMode[modeIds[0]];
+            if (value && typeof value === 'object' && 'r' in value) {
+              const hex = rgbToHex(value as RGB);
+              brandSet.push({ name: imported.name, id: imported.id, hex });
+            }
+          } catch (err) {
+            console.warn(`Could not import variable: ${v.name}`, err);
+          }
+        }
+      }
+    }
+  }
+
+  brandVariables = brandSet;
   figma.ui.postMessage({ type: 'brand-colors', data: brandVariables });
 }
 
@@ -96,9 +117,9 @@ function applyVariableToGroup(groupHex: string, variableId: string): void {
   for (const node of group.nodes) {
     if ('boundVariables' in node && typeof node.setBoundVariable === 'function') {
       try {
-        node.setBoundVariable('fills' as any, variableId);
+        node.setBoundVariable('fill' as VariableBindableNodeField, variableId);
       } catch (e) {
-        console.warn(`Could not bind variable to node:`, node, e);
+        console.warn('Could not bind variable to node:', node, e);
       }
     }
   }
@@ -110,8 +131,8 @@ function applyVariableToGroup(groupHex: string, variableId: string): void {
 figma.ui.onmessage = msg => {
   switch (msg.type) {
     case 'init':
-      loadBrandVariables();
       collectSelectionColors();
+      loadBrandVariables();
       break;
 
     case 'replace-group': {
